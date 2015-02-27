@@ -1,14 +1,13 @@
 #!/bin/sh
 
 SCP_BIN=`which scp`
-SSHPASS_BIN="`pwd`/sshpass"
+SSH_BIN=`which ssh`
+SSHPASS_BIN="`dirname $0`/sshpass"
 TAR_BIN=`which tar`
 
 hosts_file=""
 dest_dir=""
 verbose=0
-
-TMP_FILE=`mktemp`
 
 show_help() {
 cat << EOF
@@ -32,6 +31,33 @@ log() {
     fi
 }
 
+check_env() {
+	if [ -z "$SCP_BIN" ]
+	then
+	    echo "Can't find scp binary" >&2 
+	    exit 1
+	fi
+
+	if [ -z "$SSH_BIN" ]
+	then
+	    echo "Can't find ssh binary" >&2 
+	    exit 1
+	fi
+
+	if [ -z "$TAR_BIN" ]
+	then
+	    echo "Can't find tar binary" >&2 
+	    exit 1
+	fi
+
+
+	if [ ! -f "$SSHPASS_BIN" ]
+	then
+	    echo "Can't find sshpass binary in local dir" >&2 
+	    exit 1
+	fi
+}
+
 while getopts "hvf:d:" opt; do
     case "$opt" in
         h)
@@ -53,6 +79,8 @@ while getopts "hvf:d:" opt; do
     esac
 done
 
+shift "$((OPTIND-1))" # Shift off the options and optional --.
+
 if [ -z "$hosts_file" ] || [ -z "$dest_dir" ]
 then 
     echo "Missing option -f or -d" >&2
@@ -60,48 +88,18 @@ then
     exit 1
 fi
 
-if [ -z "$SCP_BIN" ]
-then
-    echo "Can't find scp binary" >&2 
-    exit 1
-fi
+check_env 
 
-if [ -z "$TAR_BIN" ]
-then
-    echo "Can't find tar binary" >&2 
-    exit 1
-fi
-
-
-if [ ! -f "$SSHPASS_BIN" ]
-then
-    echo "Can't find sshpass binary in local dir" >&2 
-    exit 1
-fi
-
-if [ -z "$TMP_FILE" ]
-then
-    TMP_FILE="/tmp/$$-`date +'%s'`.tmp"
-fi
-
-TMP_FILE="$TMP_FILE.tar"
-echo $TMP_FILE
-
-shift "$((OPTIND-1))" # Shift off the options and optional --.
+TMP_FILE="`basename $0`-$$-`date +'%s'`".tar
 
 for file in $@
 do
     log "Add $file to archive $TMP_FILE."
-    $TAR_BIN --append --file=$TMP_FILE -C `dirname $file` `basename $file`
+    $TAR_BIN --append --file="/tmp/$TMP_FILE" -C `dirname $file` `basename $file`
 done
 
 for line in `cat $hosts_file`; 
 do
-    USR=
-    PASSWD=
-    PORT=
-    ARGS=
-
     TMP=`echo $line | cut -f1 -d\@`
     HOST=`echo $line | rev | cut -f1 -d\@ | rev`
     TMP=`echo $line | rev | cut -f2- -d\@ | rev`
@@ -122,24 +120,28 @@ do
         HOST=`echo $HOST | cut -f1 -d\:`
     fi
 
-    log "Send to '$line' - USER '$USR'; PASSWORD '$PASSWD'; HOST '$HOST'; PORT '$PORT'" 
-
-    CMD_PREFIX=
     if [ "$PASSWD" ]
     then 
-        CMD_PREFIX="$SSHPASS_BIN -p $PASSWD"
+        SSHPASS_CMD="$SSHPASS_BIN -p $PASSWD"
     fi
     
     if [ $USR ];
     then
         HOST=$USR@$HOST
     fi
+
     if [ $PORT ];
     then
-        ARGS="-P $PORT"
+        SCP_ARGS="-P $PORT"
+        SSH_ARGS="-p $PORT"
     fi 
 
-    $CMD_PREFIX $SCP_BIN $TMP_FILE $HOST:/$dest_dir/
+    log "Send to '$line' - USER '$USR'; PASSWORD '$PASSWD'; HOST '$HOST'; PORT '$PORT'" 
+    $SSHPASS_CMD $SCP_BIN $SCP_ARGS "/tmp/$TMP_FILE" $HOST:/$dest_dir/
+    log "Extract from archive on the remote host"
+    $SSHPASS_CMD $SSH_BIN $SSH_ARGS $HOST "tar xf /$dest_dir/$TMP_FILE -C /$dest_dir/ && rm -f /$dest_dir/$TMP_FILE"
 done
+
+rm -f "/tmp/$TMP_FILE"
 
 exit 0
