@@ -1,13 +1,14 @@
 #!/bin/sh
 
+SSH_DEPLOY=$0
 SCP_BIN=`which scp`
 SSH_BIN=`which ssh`
 SSHPASS_BIN="`dirname $0`/sshpass"
 TAR_BIN=`which tar`
 
-hosts_file=""
-dest_dir=""
-verbose=0
+SSH_ARGS='-oStrictHostKeyChecking=no'
+
+VERBOSE=false
 
 show_help() {
 cat << EOF
@@ -21,12 +22,12 @@ Options:
     -h          display this help and exit.
     -f FILE     FILE with HOSTs.
     -d DEST DIR DEST DIR on the remote host 
-    -v          verbose mode.
+    -v          VERBOSE mode.
 EOF
 }
 
 log() {
-    if [ $verbose -gt 0 ]; then 
+    if [ $VERBOSE = true ]; then
         echo "$1"
     fi
 }
@@ -58,60 +59,19 @@ check_env() {
 	fi
 }
 
-while getopts "hvf:d:" opt; do
-    case "$opt" in
-        h)
-            show_help
-            exit 0
-            ;;
-        f)
-            hosts_file=$OPTARG
-            ;;
-        d)
-            dest_dir=$OPTARG
-            ;;
-        v)
-            verbose=1
-            ;;
-        ?)
-            show_help >&2 
-            exit 1
-    esac
-done
+get_credentials() {
 
-shift "$((OPTIND-1))" # Shift off the options and optional --.
+    TMP=`echo $1 | cut -f1 -d\@`
+    HOST=`echo $1 | rev | cut -f1 -d\@ | rev`
+    TMP=`echo $1 | rev | cut -f2- -d\@ | rev`
 
-if [ -z "$hosts_file" ] || [ -z "$dest_dir" ]
-then 
-    echo "Missing option -f or -d" >&2
-    show_help >&2
-    exit 1
-fi
-
-check_env 
-
-TMP_FILE="`basename $0`-$$-`date +'%s'`".tar
-
-for file in $@
-do
-    log "Add $file to archive $TMP_FILE."
-    $TAR_BIN --append --file="/tmp/$TMP_FILE" -C `dirname $file` `basename $file`
-done
-
-for line in `cat $hosts_file`; 
-do
-    TMP=`echo $line | cut -f1 -d\@`
-    HOST=`echo $line | rev | cut -f1 -d\@ | rev`
-    TMP=`echo $line | rev | cut -f2- -d\@ | rev`
-
-    if [ "$TMP" != "$line" ];
-    then 
+    if [ "$TMP" != "$1" ];
+    then
             USR=`echo $TMP | cut -f1 -d\:`
             if [ $USR != $TMP ];
             then
                 PASSWD=`echo $TMP | cut -f2- -d\:`
             fi
-        
     fi
 
     if [ `echo $HOST | cut -f1 -d\:` != $HOST ];
@@ -121,10 +81,10 @@ do
     fi
 
     if [ "$PASSWD" ]
-    then 
+    then
         SSHPASS_CMD="$SSHPASS_BIN -p $PASSWD"
     fi
-    
+
     if [ $USR ];
     then
         HOST=$USR@$HOST
@@ -133,15 +93,118 @@ do
     if [ $PORT ];
     then
         SCP_ARGS="-P $PORT"
-        SSH_ARGS="-p $PORT"
-    fi 
+        SSH_ARGS="$SSH_ARGS -p $PORT"
+    fi
+}
 
-    log "Send to '$line' - USER '$USR'; PASSWORD '$PASSWD'; HOST '$HOST'; PORT '$PORT'" 
-    $SSHPASS_CMD $SCP_BIN $SCP_ARGS "/tmp/$TMP_FILE" $HOST:/$dest_dir/
-    log "Extract from archive on the remote host"
-    $SSHPASS_CMD $SSH_BIN $SSH_ARGS $HOST "tar xf /$dest_dir/$TMP_FILE -C /$dest_dir/ && rm -f /$dest_dir/$TMP_FILE"
+while getopts "hvf:d:p:r:" opt; do
+    case "$opt" in
+        h)
+            show_help
+            exit 0
+            ;;
+        f)
+            HOST_FILE=$OPTARG
+            log "File with hosts - $HOST_FILE"
+            ;;
+        p)
+            HOP_NEXT=$OPTARG
+            eval HOP=\$$OPTIND
+            while [ $# -ge $OPTIND ] && [ `expr match $HOP '^-.*'` -eq 0 ];
+            do
+                HOP_LIST="$HOP_LIST $HOP"
+                OPTIND=$(($OPTIND + 1))
+                eval HOP=\$$OPTIND
+            done
+            log "HOP LIST - $NEXT_HOP $HOP_LIST"
+            ;;
+        r)
+            TAR_FILE=$OPTARG
+            ;;
+        d)
+            DEST_DIR=$OPTARG
+            log "Destination dir - $DEST_DIR"
+            ;;
+        v)
+            VERBOSE=true
+            ;;
+        ?)
+            show_help >&2 
+            exit 1
+    esac
 done
 
-rm -f "/tmp/$TMP_FILE"
+shift "$((OPTIND-1))" # Shift off the options and optional --.
+
+if [ "$HOST_FILE" ] && [ "$HOP_NEXT" ]
+then
+    echo "Contradictory options -f and -p" >&2
+    show_help >&2
+    exit 1
+fi
+
+if [ -z $HOP_NEXT ] && ([ -z "$HOST_FILE" ] || [ -z "$DEST_DIR" ])
+then 
+    echo "Missing option -f or -d" >&2
+    show_help >&2
+    exit 1
+fi
+
+check_env 
+
+for file in $@
+do
+    TMP_FILE="`basename $0`-$$-`date +'%s'`".tar
+    TMP_DIR='/tmp/'
+
+    log "Add $file to archive $TMP_FILE."
+    $TAR_BIN --append --file="/$TMP_DIR/$TMP_FILE" -C `dirname $file` `basename $file`
+done
+
+if [ "$HOST_FILE" ] && [ "$TMP_FILE" ]
+then
+    for line in `cat $HOST_FILE`
+    do
+        get_credentials $line
+
+        log "Send to '$line' - USER '$USR'; PASSWORD '$PASSWD'; HOST '$HOST'; PORT '$PORT'"
+        $SSHPASS_CMD $SCP_BIN $SCP_ARGS "/$TMP_DIR/$TMP_FILE" $HOST:/$DEST_DIR/
+        log "Extract from archive on the remote host"
+        $SSHPASS_CMD $SSH_BIN $SSH_ARGS $HOST "tar xf /$DEST_DIR/$TMP_FILE -C /$DEST_DIR/ && rm -f /$DEST_DIR/$TMP_FILE"
+    done
+
+    rm -f "/$TMP_DIR/$TMP_FILE"
+
+fi
+
+if [ "$HOP_NEXT" ] && ([ "$TMP_FILE" ] || [ "$TAR_FILE" ])
+then
+        get_credentials $HOP_NEXT
+        if [ "$TAR_FILE" ]
+        then
+            TMP_DIR=`dirname $TAR_FILE`
+            TMP_FILE=`basename $TAR_FILE`
+            DO_NOT_CLEAN=true
+        fi
+
+        log "Send to '$HOP_NEXT' - USER '$USR'; PASSWORD '$PASSWD'; HOST '$HOST'; PORT '$PORT'"
+        $SSHPASS_CMD $SCP_BIN $SCP_ARGS "/$TMP_DIR/$TMP_FILE" $HOST:/$DEST_DIR/
+        $SSHPASS_CMD $SCP_BIN $SCP_ARGS $SSH_DEPLOY $HOST:/$DEST_DIR/
+        $SSHPASS_CMD $SCP_BIN $SCP_ARGS $SSHPASS_BIN $HOST:/$DEST_DIR/
+        if [ -z "$HOP_LIST" ]
+        then
+            log "Extract from archive on the remote host"
+            $SSHPASS_CMD $SSH_BIN $SSH_ARGS $HOST "tar xf /$DEST_DIR/$TMP_FILE -C /$DEST_DIR/ && rm -f /$DEST_DIR/$TMP_FILE"
+        else
+            log "Run next hop"
+            $SSHPASS_CMD $SSH_BIN $SSH_ARGS $HOST "/$DEST_DIR/`basename $SSH_DEPLOY` -v -p $HOP_LIST -d $DEST_DIR -r /$DEST_DIR/$TMP_FILE && \
+                            (rm -f /$DEST_DIR/`basename $SSH_DEPLOY`; rm -f /$DEST_DIR/`basename $SSHPASS_BIN`; rm -f /$DEST_DIR/$TMP_FILE)"
+
+        fi
+        if [ -z "$TAR_FILE" ]
+        then
+            rm -f $TMP_FILE
+        fi
+fi
 
 exit 0
