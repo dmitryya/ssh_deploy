@@ -10,27 +10,34 @@ SSH_ARGS='-oStrictHostKeyChecking=no'
 
 VERBOSE=false
 
+
 show_help() {
 cat << EOF
-Usage: ${0##*/} [-h] [-f FILE] [-d DEST DIR] [DIR or FILE]...[DIR or FILE]
+Usage: ${0##*/} [-h] [ [-f FILE] | -p [HOST] .. [HOST] ] - [-d DEST DIR] [ -a [TAR FILE] | [DIR or FILE]...[DIR or FILE]]
 Copy DIRs or FILEs to DEST DIR on remote hosts. Hosts are in FILE. 
 FILE format: 
         username:password@host:port
         ...
         username:password@host:port
+HOST format:
+        <user>:<password>@<host name or ip>:<port>
 Options:
-    -h          display this help and exit.
-    -f FILE     FILE with HOSTs.
-    -d DEST DIR DEST DIR on the remote host 
-    -v          VERBOSE mode.
+    -h                  display this help and exit.
+    -f FILE             FILE with HOSTs.
+    -p HOST ... HOST    Hosts which will be used as hops to send FILEs
+    -d DEST DIR         Destination DIR on the remote host
+    -a TAR FILE         TAR archive for sending instead of DIRs or FILEs
+    -v                  VERBOSE mode.
 EOF
 }
+
 
 log() {
     if [ $VERBOSE = true ]; then
         echo "$1"
     fi
 }
+
 
 check_env() {
 	if [ -z "$SCP_BIN" ]
@@ -58,6 +65,7 @@ check_env() {
 	    exit 1
 	fi
 }
+
 
 get_config() {
 
@@ -97,7 +105,41 @@ get_config() {
     fi
 }
 
-while getopts "hvf:d:p:r:" opt; do
+
+send_to_host() {
+    # $1 - HOP_NEXT
+    # $2 - FILE
+    get_config $1
+
+    log "Send to '$1' - USER '$USR'; PASSWORD '$PASSWD'; HOST '$HOST'; PORT '$PORT'"
+    $SSHPASS_CMD $SCP_BIN $SCP_ARGS "/$TMP_DIR/$2" $HOST:/$DEST_DIR/
+    log "Extract from archive on the remote host"
+    $SSHPASS_CMD $SSH_BIN $SSH_ARGS $HOST "tar xf /$DEST_DIR/$2 -C /$DEST_DIR/ && rm -f /$DEST_DIR/$2"
+}
+
+
+send_to_hops() {
+    # $1 - HOP_NEXT
+    # $2 - HOP_LIST
+    # $3 - FILE
+    get_config $1
+    log "Send to '$1' - USER '$USR'; PASSWORD '$PASSWD'; HOST '$HOST'; PORT '$PORT'"
+    $SSHPASS_CMD $SCP_BIN $SCP_ARGS "/$TMP_DIR/$3" $HOST:/$DEST_DIR/
+    if [ -z "$2" ]
+    then
+        log "Extract from archive on the remote host"
+        $SSHPASS_CMD $SSH_BIN $SSH_ARGS $HOST "tar xf /$DEST_DIR/$3 -C /$DEST_DIR/ && rm -f /$DEST_DIR/$3"
+    else
+        log "Run next hop"
+        $SSHPASS_CMD $SCP_BIN $SCP_ARGS $SSH_DEPLOY $HOST:/$DEST_DIR/
+        $SSHPASS_CMD $SCP_BIN $SCP_ARGS $SSHPASS_BIN $HOST:/$DEST_DIR/
+        $SSHPASS_CMD $SSH_BIN $SSH_ARGS $HOST "/$DEST_DIR/`basename $SSH_DEPLOY` -v -p $2 -d $DEST_DIR -a /$DEST_DIR/$3 && \
+                        (rm -f /$DEST_DIR/`basename $SSH_DEPLOY`; rm -f /$DEST_DIR/`basename $SSHPASS_BIN`; rm -f /$DEST_DIR/$3)"
+
+    fi
+}
+
+while getopts "hvf:d:p:a:" opt; do
     case "$opt" in
         h)
             show_help
@@ -118,7 +160,7 @@ while getopts "hvf:d:p:r:" opt; do
             done
             log "HOP LIST - $NEXT_HOP $HOP_LIST"
             ;;
-        r)
+        a)
             TAR_FILE=$OPTARG
             ;;
         d)
@@ -152,59 +194,39 @@ fi
 
 check_env 
 
-for file in $@
-do
-    TMP_FILE="`basename $0`-$$-`date +'%s'`".tar
-    TMP_DIR='/tmp/'
+if [ "$TAR_FILE" ]
+then
+    TAR_FILE=`realpath $TAR_FILE`
+    TMP_DIR=`dirname $TAR_FILE`
+    TMP_FILE=`basename $TAR_FILE`
+    DO_NOT_CLEAN=true
+else
+    for file in $@
+    do
+        TMP_FILE="`basename $0`-$$-`date +'%s'`".tar
+        TMP_DIR='/tmp/'
 
-    log "Add $file to archive $TMP_FILE."
-    $TAR_BIN --append --file="/$TMP_DIR/$TMP_FILE" -C `dirname $file` `basename $file`
-done
+        log "Add $file to archive $TMP_FILE."
+        $TAR_BIN --append --file="/$TMP_DIR/$TMP_FILE" -C `dirname "$file"` `basename "$file"`
+    done
+fi
 
 if [ "$HOST_FILE" ] && [ "$TMP_FILE" ]
 then
-    for line in `cat $HOST_FILE`
+    for host in `cat $HOST_FILE`
     do
-        get_config $line
-
-        log "Send to '$line' - USER '$USR'; PASSWORD '$PASSWD'; HOST '$HOST'; PORT '$PORT'"
-        $SSHPASS_CMD $SCP_BIN $SCP_ARGS "/$TMP_DIR/$TMP_FILE" $HOST:/$DEST_DIR/
-        log "Extract from archive on the remote host"
-        $SSHPASS_CMD $SSH_BIN $SSH_ARGS $HOST "tar xf /$DEST_DIR/$TMP_FILE -C /$DEST_DIR/ && rm -f /$DEST_DIR/$TMP_FILE"
+        send_to_host $host $TMP_FILE
     done
-
-    rm -f "/$TMP_DIR/$TMP_FILE"
-
 fi
 
 if [ "$HOP_NEXT" ] && ([ "$TMP_FILE" ] || [ "$TAR_FILE" ])
 then
-        get_config $HOP_NEXT
-        if [ "$TAR_FILE" ]
-        then
-            TMP_DIR=`dirname $TAR_FILE`
-            TMP_FILE=`basename $TAR_FILE`
-            DO_NOT_CLEAN=true
-        fi
+        send_to_hops "$HOP_NEXT" "$HOP_LIST" "$TMP_FILE"
+fi
 
-        log "Send to '$HOP_NEXT' - USER '$USR'; PASSWORD '$PASSWD'; HOST '$HOST'; PORT '$PORT'"
-        $SSHPASS_CMD $SCP_BIN $SCP_ARGS "/$TMP_DIR/$TMP_FILE" $HOST:/$DEST_DIR/
-        $SSHPASS_CMD $SCP_BIN $SCP_ARGS $SSH_DEPLOY $HOST:/$DEST_DIR/
-        $SSHPASS_CMD $SCP_BIN $SCP_ARGS $SSHPASS_BIN $HOST:/$DEST_DIR/
-        if [ -z "$HOP_LIST" ]
-        then
-            log "Extract from archive on the remote host"
-            $SSHPASS_CMD $SSH_BIN $SSH_ARGS $HOST "tar xf /$DEST_DIR/$TMP_FILE -C /$DEST_DIR/ && rm -f /$DEST_DIR/$TMP_FILE"
-        else
-            log "Run next hop"
-            $SSHPASS_CMD $SSH_BIN $SSH_ARGS $HOST "/$DEST_DIR/`basename $SSH_DEPLOY` -v -p $HOP_LIST -d $DEST_DIR -r /$DEST_DIR/$TMP_FILE && \
-                            (rm -f /$DEST_DIR/`basename $SSH_DEPLOY`; rm -f /$DEST_DIR/`basename $SSHPASS_BIN`; rm -f /$DEST_DIR/$TMP_FILE)"
-
-        fi
-        if [ -z "$TAR_FILE" ]
-        then
-            rm -f $TMP_FILE
-        fi
+if [ -z "$TAR_FILE" ]
+then
+    rm -f $TMP_FILE
 fi
 
 exit 0
