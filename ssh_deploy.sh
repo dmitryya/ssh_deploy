@@ -59,7 +59,7 @@ check_env() {
 	fi
 }
 
-get_credentials() {
+get_config() {
 
     TMP=`echo $1 | cut -f1 -d\@`
     HOST=`echo $1 | rev | cut -f1 -d\@ | rev`
@@ -165,7 +165,7 @@ if [ "$HOST_FILE" ] && [ "$TMP_FILE" ]
 then
     for line in `cat $HOST_FILE`
     do
-        get_credentials $line
+        get_config $line
 
         log "Send to '$line' - USER '$USR'; PASSWORD '$PASSWD'; HOST '$HOST'; PORT '$PORT'"
         $SSHPASS_CMD $SCP_BIN $SCP_ARGS "/$TMP_DIR/$TMP_FILE" $HOST:/$DEST_DIR/
@@ -179,7 +179,7 @@ fi
 
 if [ "$HOP_NEXT" ] && ([ "$TMP_FILE" ] || [ "$TAR_FILE" ])
 then
-        get_credentials $HOP_NEXT
+        get_config $HOP_NEXT
         if [ "$TAR_FILE" ]
         then
             TMP_DIR=`dirname $TAR_FILE`
